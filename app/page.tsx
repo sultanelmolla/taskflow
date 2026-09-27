@@ -5,7 +5,7 @@ import { onAuthStateChanged, signInWithEmailAndPassword, signOut, User } from "f
 import { auth, db } from "../lib/firebase";
 
 type Status="Pending"|"In Progress"|"Completed"|"Cancelled";
-type Task={id:number;name:string;client:string;category:string;price:number;deadline:string;status:Status;paid:number;notes:string};
+type Task={id:number;name:string;client:string;category:string;price:number;taskCount?:number;deadline:string;status:Status;paid:number;notes:string};
 type Client={id:number;name:string;notes:string};
 type Category={id:number;name:string;defaultPrice:number};
 type View="Dashboard"|"Tasks"|"Clients"|"Categories"|"Reports";
@@ -42,9 +42,9 @@ function Dashboard({user}:{user:User}){
      localCats.forEach(c=>batch.set(doc(db,base,"categories",String(c.id)),c));
      await batch.commit();
      if(cancelled)return;
-     setTasks(localTasks);setClients(localClients);setCats(localCats);
+     setTasks(localTasks.map(t=>({...t,taskCount:t.taskCount||1})));setClients(localClients);setCats(localCats);
     }else{
-     setTasks(ts.docs.map(d=>d.data() as Task).sort((a,b)=>b.id-a.id));
+     setTasks(ts.docs.map(d=>({...d.data() as Task,taskCount:(d.data() as Task).taskCount||1})).sort((a,b)=>b.id-a.id));
      setClients(cs.docs.map(d=>d.data() as Client));
      setCats(ks.docs.map(d=>d.data() as Category));
     }
@@ -69,7 +69,7 @@ function Dashboard({user}:{user:User}){
  };
  async function saveTask(e:React.FormEvent<HTMLFormElement>){
   e.preventDefault();let f=new FormData(e.currentTarget);
-  let obj={name:String(f.get("name")),client:String(f.get("client")),category:String(f.get("category")),price:Number(f.get("price")),deadline:String(f.get("deadline")),status:String(f.get("status")) as Status,paid:Number(f.get("paid")||0),notes:String(f.get("notes")||"")};
+  let obj={name:String(f.get("name")),client:String(f.get("client")),category:String(f.get("category")),price:Number(f.get("price")),taskCount:Math.max(1,Number(f.get("taskCount")||1)),deadline:String(f.get("deadline")),status:String(f.get("status")) as Status,paid:Number(f.get("paid")||0),notes:String(f.get("notes")||"")};
   if(edit){
    const updated={...edit,...obj};
    setTasks(tasks.map(t=>t.id===edit.id?updated:t));
@@ -81,20 +81,34 @@ function Dashboard({user}:{user:User}){
   }
   setModal(false);setEdit(null);
  }
+ async function exportWeeklyExcel(){
+  const XLSX=await import("xlsx");
+  const now=new Date(), day=now.getDay();
+  const monday=new Date(now); monday.setHours(0,0,0,0); monday.setDate(now.getDate()-(day===0?6:day-1));
+  const sunday=new Date(monday); sunday.setDate(monday.getDate()+6); sunday.setHours(23,59,59,999);
+  const weekly=active.filter(t=>{const d=new Date(t.deadline+"T00:00:00");return d>=monday&&d<=sunday;});
+  const rows=weekly.map(t=>({"Task ID":t.id,"Task":t.name,"Client":t.client,"Category":t.category,"Task Count":t.taskCount||1,"Price (EGP)":t.price,"Received (EGP)":t.paid,"Remaining (EGP)":Math.max(0,t.price-t.paid),"Deadline":t.deadline,"Status":t.status,"Notes":t.notes}));
+  const count=weekly.reduce((a,t)=>a+(t.taskCount||1),0), value=weekly.reduce((a,t)=>a+t.price,0), received=weekly.reduce((a,t)=>a+Math.min(t.paid,t.price),0);
+  const summary=[{"Metric":"Week Start","Value":monday.toISOString().slice(0,10)},{"Metric":"Week End","Value":sunday.toISOString().slice(0,10)},{"Metric":"Total Task Count","Value":count},{"Metric":"Total Value (EGP)","Value":value},{"Metric":"Total Received (EGP)","Value":received},{"Metric":"Total Remaining (EGP)","Value":value-received},{"Metric":"Completed","Value":weekly.filter(t=>t.status==="Completed").reduce((a,t)=>a+(t.taskCount||1),0)},{"Metric":"In Progress","Value":weekly.filter(t=>t.status==="In Progress").reduce((a,t)=>a+(t.taskCount||1),0)},{"Metric":"Pending","Value":weekly.filter(t=>t.status==="Pending").reduce((a,t)=>a+(t.taskCount||1),0)}];
+  const wb=XLSX.utils.book_new(), ws=XLSX.utils.json_to_sheet(rows.length?rows:[{"Message":"No tasks due this week"}]), ss=XLSX.utils.json_to_sheet(summary);
+  ws["!cols"]=[{wch:10},{wch:28},{wch:20},{wch:18},{wch:12},{wch:14},{wch:16},{wch:17},{wch:14},{wch:14},{wch:30}]; ss["!cols"]=[{wch:24},{wch:18}];
+  XLSX.utils.book_append_sheet(wb,ws,"Weekly Tasks"); XLSX.utils.book_append_sheet(wb,ss,"Summary");
+  XLSX.writeFile(wb,`TaskFlow-Weekly-${monday.toISOString().slice(0,10)}.xlsx`);
+ }
  const openEdit=(t:Task)=>{setEdit(t);setModal(true)};
  return <main className="shell"><aside><div className="brand"><span>TF</span>TaskFlow</div><nav>{(["Dashboard","Tasks","Clients","Categories","Reports"] as View[]).map(v=><button key={v} className={view===v?"selected":""} onClick={()=>setView(v)}>{v}</button>)}</nav><button className="settings">⚙ Settings</button></aside>
  <section className="content"><header><div><h1>{view}</h1><p>{view==="Dashboard"?"Track your work, deadlines and income.":"Manage your "+view.toLowerCase()+"."}</p></div><div className="headerActions"><button className="logout" onClick={()=>signOut(auth)}>Sign out</button><button className="primary" onClick={()=>{setEdit(null);setModal(true)}}>＋ Add Task</button></div></header>
- {view==="Dashboard"&&<><div className="cards"><article><small>Total Tasks</small><strong>{active.length}</strong><em>All active work</em></article><article><small>Completed</small><strong>{completed}</strong><em>{active.length?Math.round(completed/active.length*100):0}% completion rate</em></article><article><small>Total Value</small><strong>{money(total)}</strong><em>All task value</em></article><article className="danger"><small>Remaining</small><strong>{money(unpaid)}</strong><em>Still to collect</em></article></div>
+ {view==="Dashboard"&&<><div className="cards"><article><small>Total Tasks</small><strong>{active.reduce((sum,t)=>sum+(t.taskCount||1),0)}</strong><em>All active work</em></article><article><small>Completed</small><strong>{completed}</strong><em>{active.length?Math.round(completed/active.length*100):0}% completion rate</em></article><article><small>Total Value</small><strong>{money(total)}</strong><em>All task value</em></article><article className="danger"><small>Remaining</small><strong>{money(unpaid)}</strong><em>Still to collect</em></article></div>
  <div className="grid"><article className="panel"><div className="panelTitle"><div><h2>Income Overview</h2><p>Received vs remaining</p></div><b>{money(paid)}</b></div><div className="bigProgress"><i style={{width:`${total?paid/total*100:0}%`}}/></div><div className="split"><span>Received <b>{money(paid)}</b></span><span>Remaining <b>{money(unpaid)}</b></span></div></article>
  <article className="panel"><h2>Quick Summary</h2><div className="summary">{(["In Progress","Pending","Completed"] as Status[]).map(s=><div key={s}><span>{s}</span><b>{active.filter(t=>t.status===s).length}</b></div>)}</div></article></div><TaskTable tasks={shown} q={q} setQ={setQ} patch={patch} openEdit={openEdit} del={del}/></>}
  {view==="Tasks"&&<TaskTable tasks={shown} q={q} setQ={setQ} patch={patch} openEdit={openEdit} del={del}/>}
  {view==="Clients"&&<article className="panel"><div className="panelTitle"><div><h2>Clients</h2><p>Balances are calculated automatically.</p></div><button className="mini" onClick={async()=>{let n=prompt("Client name");if(n){let c:Client={id:Date.now(),name:n,notes:""};setClients([...clients,c]);await setDoc(doc(db,"users",user.uid,"clients",String(c.id)),c)}}}>+ Client</button></div><div className="clientGrid">{clients.map(c=>{let x=active.filter(t=>t.client===c.name),tv=x.reduce((s,t)=>s+t.price,0),pr=x.reduce((s,t)=>s+t.paid,0);return <div className="clientCard" key={c.id}><h3>{c.name}</h3><p>{x.length} tasks</p><strong>{money(tv-pr)}</strong><small>remaining</small></div>})}</div></article>}
  {view==="Categories"&&<article className="panel"><div className="panelTitle"><div><h2>Categories</h2><p>Set a default price for recurring work.</p></div><button className="mini" onClick={async()=>{let n=prompt("Category name");let p=prompt("Default price");if(n&&p){let c:Category={id:Date.now(),name:n,defaultPrice:Number(p)};setCats([...cats,c]);await setDoc(doc(db,"users",user.uid,"categories",String(c.id)),c)}}}>+ Category</button></div>{cats.map(c=><div className="categoryRow" key={c.id}><b>{c.name}</b><span>{money(c.defaultPrice)}</span></div>)}</article>}
- {view==="Reports"&&<article className="panel report"><h2>Performance Report</h2><div className="reportGrid"><div><small>Total Work</small><b>{money(total)}</b></div><div><small>Received</small><b>{money(paid)}</b></div><div><small>Outstanding</small><b>{money(unpaid)}</b></div><div><small>Average Task</small><b>{money(active.length?Math.round(total/active.length):0)}</b></div></div><h3>Top Clients</h3>{clients.map(c=><div className="categoryRow" key={c.id}><span>{c.name}</span><b>{money(active.filter(t=>t.client===c.name).reduce((sum,t)=>sum+t.price,0))}</b></div>)}</article>}
+ {view==="Reports"&&<article className="panel report"><div className="panelTitle"><div><h2>Performance Report</h2><p>Current totals and weekly Excel export.</p></div><button className="mini" onClick={exportWeeklyExcel}>Export Weekly Excel</button></div><div className="reportGrid"><div><small>Task Count</small><b>{active.reduce((sum,t)=>sum+(t.taskCount||1),0)}</b></div><div><small>Total Work</small><b>{money(total)}</b></div><div><small>Received</small><b>{money(paid)}</b></div><div><small>Outstanding</small><b>{money(unpaid)}</b></div><div><small>Average Task</small><b>{money(active.length?Math.round(total/active.length):0)}</b></div></div><h3>Top Clients</h3>{clients.map(c=><div className="categoryRow" key={c.id}><span>{c.name}</span><b>{money(active.filter(t=>t.client===c.name).reduce((sum,t)=>sum+t.price,0))}</b></div>)}</article>}
  </section>
  {modal&&<div className="overlay" onMouseDown={()=>{setModal(false);setEdit(null)}}><form className="modal" onSubmit={saveTask} onMouseDown={e=>e.stopPropagation()}><div className="modalHead"><div><h2>{edit?"Edit Task":"Add New Task"}</h2><p>Task, client, price and payment.</p></div><button type="button" onClick={()=>setModal(false)}>×</button></div>
  <label>Task name<input required name="name" defaultValue={edit?.name}/></label><div className="two"><label>Client<select name="client" defaultValue={edit?.client}>{clients.map(c=><option key={c.id}>{c.name}</option>)}</select></label><label>Category<select name="category" defaultValue={edit?.category}>{cats.map(c=><option key={c.id}>{c.name}</option>)}</select></label></div>
- <div className="two"><label>Price<input required type="number" name="price" defaultValue={edit?.price}/></label><label>Received<input type="number" name="paid" defaultValue={edit?.paid||0}/></label></div><div className="two"><label>Deadline<input required type="date" name="deadline" defaultValue={edit?.deadline}/></label><label>Status<select name="status" defaultValue={edit?.status||"Pending"}><option>Pending</option><option>In Progress</option><option>Completed</option><option>Cancelled</option></select></label></div><label>Notes<textarea name="notes" defaultValue={edit?.notes}/></label><div className="modalActions"><button type="button" onClick={()=>setModal(false)}>Cancel</button><button className="primary">{edit?"Save Changes":"Add Task"}</button></div></form></div>}
+ <div className="two"><label>Price<input required type="number" name="price" defaultValue={edit?.price}/></label><label>Received<input type="number" name="paid" defaultValue={edit?.paid||0}/></label></div><div className="two"><label>Task Count<input required min="1" step="1" type="number" name="taskCount" defaultValue={edit?.taskCount||1}/></label><label>Deadline<input required type="date" name="deadline" defaultValue={edit?.deadline}/></label></div><label>Status<select name="status" defaultValue={edit?.status||"Pending"}><option>Pending</option><option>In Progress</option><option>Completed</option><option>Cancelled</option></select></label><label>Notes<textarea name="notes" defaultValue={edit?.notes}/></label><div className="modalActions"><button type="button" onClick={()=>setModal(false)}>Cancel</button><button className="primary">{edit?"Save Changes":"Add Task"}</button></div></form></div>}
  </main>
 }
 export default function Home(){
@@ -112,5 +126,5 @@ export default function Home(){
 }
 
 function TaskTable({tasks,q,setQ,patch,openEdit,del}:{tasks:Task[];q:string;setQ:(x:string)=>void;patch:(id:number,d:Partial<Task>)=>void;openEdit:(t:Task)=>void;del:(id:number)=>void}){
- return <article className="panel tasks"><div className="toolbar"><div><h2>Tasks</h2><p>Search and use quick actions.</p></div><input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search task, client, ID..."/></div><div className="tableWrap"><table><thead><tr><th>Task</th><th>Client</th><th>Deadline</th><th>Status</th><th>Price</th><th>Payment</th><th>Actions</th></tr></thead><tbody>{tasks.map(t=>{let remain=Math.max(0,t.price-t.paid),ps=remain===0?"Paid":t.paid>0?"Partial":"Unpaid";return <tr key={t.id}><td><b>{t.name}</b><small>#{t.id} · {t.category}</small></td><td>{t.client}</td><td>{t.deadline}</td><td><span className={"pill "+t.status.replaceAll(" ","").toLowerCase()}>{t.status}</span></td><td><b>{money(t.price)}</b></td><td><span className={"pill "+ps.toLowerCase()}>{ps}</span><small>{remain?money(remain)+" left":""}</small></td><td className="actions">{t.status!=="Completed"&&<button onClick={()=>patch(t.id,{status:"Completed"})}>✓</button>}{remain>0&&<button onClick={()=>patch(t.id,{paid:t.price})}>$</button>}<button onClick={()=>openEdit(t)}>✎</button><button onClick={()=>del(t.id)}>×</button></td></tr>})}</tbody></table></div></article>
+ return <article className="panel tasks"><div className="toolbar"><div><h2>Tasks</h2><p>Search and use quick actions.</p></div><input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search task, client, ID..."/></div><div className="tableWrap"><table><thead><tr><th>Task</th><th>Client</th><th>Count</th><th>Deadline</th><th>Status</th><th>Price</th><th>Payment</th><th>Actions</th></tr></thead><tbody>{tasks.map(t=>{let remain=Math.max(0,t.price-t.paid),ps=remain===0?"Paid":t.paid>0?"Partial":"Unpaid";return <tr key={t.id}><td><b>{t.name}</b><small>#{t.id} · {t.category}</small></td><td>{t.client}</td><td><b>{t.taskCount||1}</b></td><td>{t.deadline}</td><td><span className={"pill "+t.status.replaceAll(" ","").toLowerCase()}>{t.status}</span></td><td><b>{money(t.price)}</b></td><td><span className={"pill "+ps.toLowerCase()}>{ps}</span><small>{remain?money(remain)+" left":""}</small></td><td className="actions">{t.status!=="Completed"&&<button onClick={()=>patch(t.id,{status:"Completed"})}>✓</button>}{remain>0&&<button onClick={()=>patch(t.id,{paid:t.price})}>$</button>}<button onClick={()=>openEdit(t)}>✎</button><button onClick={()=>del(t.id)}>×</button></td></tr>})}</tbody></table></div></article>
 }
